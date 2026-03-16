@@ -2,8 +2,11 @@ from dataclasses import dataclass
 import sys
 import re
 from pathlib import Path
+import numpy as np
+from scipy.optimize import milp, LinearConstraint, Bounds
 sys.path.append(str(Path(__file__).parent.parent))
 
+from line_profiler import LineProfiler
 from utils import read_lines
 
 SAMPLE_INPUT = """[.##.] (3) (1,3) (2) (2,3) (0,2) (0,1) {3,5,4,7}
@@ -16,36 +19,14 @@ MACHINE_REGEX = r"\[(?P<light_diagram>[.#]+)\]\s+" + \
 
 @dataclass
 class Machine:
+    index: int
     light_diagram: list[bool]
     wiring_schematics: list[int]
     other_wiring_schematics: list[tuple[int]]
     joltage_requirements: list[int]
 
 
-def solve_puzzle_part1():
-    # Read the input
-
-    machines = []
-    # for line in SAMPLE_INPUT.split('\n'):
-    for line in read_lines(__file__):
-        match = re.match(MACHINE_REGEX, line)
-        if not match:
-            raise ValueError(f"Line {line} does not match the expected format")
-        light_diagram_binary = ['1' if c == '#' else '0' for c in match.group('light_diagram')]
-        light_diagram = int("".join(reversed(light_diagram_binary)), 2)
-        wiring_schematics = []
-        other_wiring_schematics = []
-        for wiring_schematic in re.findall(r"\([0-9, ]+\)", match.group('wiring_schematics')):
-            wires = tuple(int(i) for i in wiring_schematic[1:-1].split(','))
-            wire_int = 0
-            for wire in wires:
-                wire_int += (1 << wire)
-            wiring_schematics.append(wire_int)
-            other_wiring_schematics.append(wires)   
-        joltage_requirements = [int(i) for i in match.group('jotage_requirements')[1:-1].split(',')]
-        machines.append(Machine(light_diagram, wiring_schematics, 
-                                other_wiring_schematics, joltage_requirements))
-
+def solve_puzzle_part1(machines):
     # Sort out the lights
     total_presses = 0
     for machine in machines:
@@ -78,51 +59,73 @@ def solve_puzzle_part1():
 
     print(f"Total presses: {total_presses}")
 
-    # Sort out the joltage
+
+machines = []
+
+def match_joltage(machine_index):
+    """Find the minimum button presses to match joltage requirements using MILP."""
+    machine = machines[machine_index]
+    n_buttons = len(machine.other_wiring_schematics)
+    n_wires = len(machine.joltage_requirements)
+
+    # A[i, j] = 1 if wire i is incremented by button j
+    A = np.zeros((n_wires, n_buttons), dtype=float)
+    for j, schematic in enumerate(machine.other_wiring_schematics):
+        for i in schematic:
+            A[i, j] = 1.0
+
+    b = np.array(machine.joltage_requirements, dtype=float)
+    c = np.ones(n_buttons, dtype=float)  # minimise total presses
+
+    constraints = LinearConstraint(A, lb=b, ub=b)  # A @ x = b exactly
+    bounds = Bounds(lb=0)                           # x_j >= 0
+    integrality = np.ones(n_buttons)               # all integer
+
+    result = milp(c, constraints=constraints, integrality=integrality, bounds=bounds)
+    if result.success:
+        return int(round(result.fun))
+    return -1  # no solution
+
+def solve_puzzle_part2(machines, profiler=None):
+    """ Solve the second part of the puzzle """
     total_presses = 0
-    for machine in machines:
-        button_count = len(machine.joltage_requirements)
-        start_joltage = button_count * [0]
+    for i in range(len(machines)):
+        min_presses = match_joltage(i)
+        print(f"Machine {i}: {min_presses} presses")
+        total_presses += min_presses
 
-        joltage_states = set()
-        joltage_states.add(tuple(start_joltage))
-
-        go_on_go_on = True
- 
-        button_presses = 0
-        while go_on_go_on:
-            next_joltage_states = set()
-            button_presses += 1
-            print(f"Searching for machine with joltage requirements {machine.joltage_requirements} in {button_presses} presses, "
-                  f"currently have {len(joltage_states)} states to search")
-            while joltage_states and go_on_go_on:
-                joltage_state = joltage_states.pop()
-                for schematic in machine.other_wiring_schematics:
-                    next_joltage_state = list(joltage_state[:])
-                    mask = 1
-                    for i in schematic:
-                        next_joltage_state[i] += 1
-                        if next_joltage_state[i] > machine.joltage_requirements[i]:
-                            next_joltage_state.clear()
-                            break
-                    if next_joltage_state == machine.joltage_requirements:
-                        print(f"Found a solution for machine with joltage requirements "
-                              f"{machine.joltage_requirements} in {button_presses} presses!")
-                        go_on_go_on = False
-                        total_presses += button_presses
-                        break
-                    if next_joltage_state:
-                        next_joltage_states.add(tuple(next_joltage_state))
-            if not next_joltage_states:
-                raise ValueError(f"No more states to search for machine with joltage "
-                                 f"requirements {machine.joltage_requirements}, giving up")
-            joltage_states = next_joltage_states
-    
     print(f"Total presses to get to the joltage levels: {total_presses}")                
 
 
-
-
-
 if __name__ == "__main__":
-    solve_puzzle_part1()
+    
+    # for index, line in enumerate(SAMPLE_INPUT.split('\n')):
+    for index, line in enumerate(read_lines(__file__)):
+        match = re.match(MACHINE_REGEX, line)
+        if not match:
+            raise ValueError(f"Line {line} does not match the expected format")
+        light_diagram_binary = ['1' if c == '#' else '0' for c in match.group('light_diagram')]
+        light_diagram = int("".join(reversed(light_diagram_binary)), 2)
+        wiring_schematics = []
+        other_wiring_schematics = []
+        for wiring_schematic in re.findall(r"\([0-9, ]+\)", match.group('wiring_schematics')):
+            wires = tuple(int(i) for i in wiring_schematic[1:-1].split(','))
+            wire_int = 0
+            for wire in wires:
+                wire_int += (1 << wire)
+            wiring_schematics.append(wire_int)
+            other_wiring_schematics.append(wires)   
+        joltage_requirements = [int(i) for i in match.group('jotage_requirements')[1:-1].split(',')]
+        machines.append(Machine(index, light_diagram, wiring_schematics, 
+                                other_wiring_schematics, joltage_requirements))
+    # solve_puzzle_part1(machines)
+    solve_puzzle_part2(machines)
+
+    # profiler = LineProfiler()
+    # profiler_wrapper = profiler(solve_puzzle_part2)
+    # try:
+    #     profiler_wrapper(machines, profiler=profiler)
+    # except KeyboardInterrupt:
+    #     print("\nInterrupted — printing partial profiler results:")
+    # finally:
+    #     profiler.print_stats()
